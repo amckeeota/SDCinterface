@@ -1,48 +1,76 @@
-//JUST FINISHED UP TO GETTING IN IDLE STATE (UNTESTED)
-//ADDED: Function "sendFrame()" and "sendByte()" which should be done with operation (IFGs checked) by the time they are done
-//NEED TO: first, check that we actually get to idle state.
+//JUST FINISHED UP TO GETTING PAST IDLE STATE (tested on SDC ver 1)
+//CHANGED: Added simple delays until UCA0RXIFG vs interrupts for better control
+//NEED TO: Write read function
+
 
 #include <msp430g2553.h>
 
-
+//Pin Defines
 #define SDCS 0x08
 #define SIMO 0x04
 #define SOMI 0x02
 #define CLK 0x10
-#define CRC 0x95
 #define GOOD 0x40
 #define BAD 0x01
 #define PWR 0x20
 
 
-int errorCode=0;
 
 //__interrupt void USCIAB0RX_ISR (void);
 
-void sendByte(int txByte){
+int sendByte(int txByte){
 	UCA0TXBUF=txByte;
 	while(!(IFG2 & UCA0TXIFG)){}
-	while(IFG2 & UCA0RXIFG){}
+	while(IFG2 & UCA0RXIFG){
+		unsigned int j = UCA0RXBUF;
+	}
+	return UCA0RXBUF;
 }
 
-void sendFrame(int cmd, long cmdArg){
-	sendByte(1<<6+cmd);		//Frame up the command
+unsigned long sendFrame(unsigned int sdcmd, long cmdArg, int CRC, int responseBytes){
+	P1OUT &= ~SDCS;
+	sendByte(0x40+sdcmd);		//Frame up the command
 	sendByte(cmdArg>>24);	//Send the four byte argument, MSB fist
 	sendByte(cmdArg>>16);
 	sendByte(cmdArg>>8);
 	sendByte(cmdArg);
 	sendByte(CRC);			//Send the CRC command (only important for SDC SW Reset)
 	//Send 0xff on the TX for NCR frames/until we get a response from the SDC!
-	int timeout=0;
+	unsigned int timeout=0;
+	unsigned int errorCode = 0xFF;
 	while(errorCode & 0x80){
-		sendByte(0xFF);
+		errorCode = sendByte(0xFF);
 		timeout++;
-		if(timeout==15){
+		if(timeout==16){
 			P1OUT |= BAD;
 			break;
 		}
 	}
-//	P1OUT |= GOOD;
+
+	long response = 0;
+	if(sdcmd == 0 & errorCode == 0x01)
+	{
+		return 1;
+	}
+	if(sdcmd == 8 & errorCode == 0x05)
+	{
+		return 5;
+	}
+	if(sdcmd == 41 && errorCode ==0x01)
+	{
+		return 1;
+	}
+
+
+	int i;
+	for(i=0;i<responseBytes;i++){
+		response << 8;
+		sendByte(0xFF);
+		response |= UCA0RXBUF;
+	}
+
+	P1OUT |= SDCS;
+	return response;
 }
 
 int main(void) {
@@ -71,8 +99,8 @@ int main(void) {
 	P1SEL2 |= BIT1 + BIT2 + BIT4;
 
 	//IE2 |= UCA0RXIE + UCA0TXIE;
-	IE2 |= UCA0RXIE;
-	_bis_SR_register(GIE);
+	//IE2 |= UCA0RXIE;
+	//_bis_SR_register(GIE);
 	while(!(IFG2 & UCA0TXIFG)){}
 	//SPI is ready to go!
 
@@ -89,27 +117,34 @@ int main(void) {
 	for(i;i<10;i++){
 		sendByte(0xFF);
 	}
-	//--------SD CARD IS IN POWER ON COMPLETE STATE---
 
+	//Put SD Card into idle state
+	unsigned long sdResponse = 0;
+	sdResponse = sendFrame(0,0,0x95,0);
 
-
-
-
-
-
-	//PERFORM SD CARD SW RESET
-	//1. Clear CS - Enable SPI to SD Card.
-	P1OUT &= ~SDCS;
-	//2. Send a Command frame with CMD0, CRC 0x95, arg 0
-	sendFrame(0,0);
-	//3. Check error register. Flag on the first bit means "Idle Mode" which we want
-	if(errorCode==0x01){
-		P1OUT |= GOOD;
+	//Check OCR in order (determines which version of SD Card to use)
+	sdResponse = sendFrame(8,0x1AA,0x07,4);	//Check SD Card Working conditions for > SD Ver 1
+	if(sdResponse == 0x05){
+		sdResponse = sendFrame(58,0,0x75,4);	//Executed only for SD Ver 1
+		sdResponse = 0x01;
+		//Initialize SD Card Ver 1
+		while(sdResponse != 0){
+			sdResponse = sendFrame(55,0,0x95,0);	//Send ACMD41 until we get out of idle state
+			sdResponse = sendFrame(41,0,0x95,0);
+			if(sdResponse == 0){
+				P1OUT |= GOOD;
+			}
+		}
 	}
-
-
-
-
+	else{
+		//Initialize SD Card Ver 2
+		while(sdResponse != 0){
+			sdResponse = sendFrame(55,0,0x95,0);	//Send ACMD41 until we get out of idle state
+			sdResponse = sendFrame(41,0,0x95,0);
+			if(sdResponse == 0){
+				P1OUT |= GOOD;
+			}
+	}
 
 	for(;;) {
 
@@ -117,15 +152,9 @@ int main(void) {
 
 	return 0;
 }
-/*
-#pragma vector = USCIAB0TX_VECTOR
-__interrupt void USCI0TX_ISR(void)
-{
-	P1OUT|= 0X01;
-}
-*/
-#pragma vector = USCIAB0RX_VECTOR
+
+/*#pragma vector = USCIAB0RX_VECTOR
 __interrupt void USCIAB0RX_ISR(void)
 {
 	errorCode=UCA0RXBUF;
-}
+}*/
