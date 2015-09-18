@@ -1,6 +1,6 @@
-//JUST FINISHED UP TO GETTING PAST IDLE STATE (tested on SDC ver 1)
-//CHANGED: Added simple delays until UCA0RXIFG vs interrupts for better control
-//NEED TO: communicate with SDHC - get response to be correct / by the time I send cmd 55 for SDHC, it is off by one nibble
+//JUST FINISHED UP TO GETTING DATA ABOUT PARTITION ONE / ONLY WORKS ON FIRST PARTITION
+//CHANGED: Made getInfoFromBlock() method to grab a byte easily
+//NEED TO: Enumerate file names (and get extensions)
 
 
 #include <msp430g2553.h>
@@ -14,8 +14,12 @@
 #define BAD 0x01
 #define PWR 0x20
 
+//Bytes per sector defaulted to 512
+unsigned char numFats=0, secsPerClust=0,reservedClusters=0;
+unsigned long partitionStart = 0;
+unsigned int sectPerFat = 0;
 
-unsigned char ultimateData [100];
+//unsigned char ultimateData [100];
 //__interrupt void USCIAB0RX_ISR (void);
 
 unsigned char sendByte(unsigned char txByte){
@@ -27,27 +31,50 @@ unsigned char sendByte(unsigned char txByte){
 		return UCA0RXBUF;
 }
 
-void readBlock(){
-	while(sendByte(0xff)!=0xfe){}
-	int i;
-	for(i=0;i<100;i++){
-		ultimateData[i] = sendByte(0xff);
-	}
-	for(i=0;i<415;i++){
+unsigned long getInfoFromBlock(unsigned int address,char length,unsigned int current){
+	unsigned int diff;
+	unsigned long target=0;
+	for(diff=(address-current); diff>0;diff--){
 		sendByte(0xff);
 	}
-/*	for(i=0;i<100;i++){
-		ultimateData[i] = sendByte(0xff);
+	for(diff=0;diff<length;diff++){
+		target |= (sendByte(0xff) << (diff*8));
 	}
-	for(i=0;i<100;i++){
-		ultimateData[i] = sendByte(0xff);
-	}
-	for(i=0;i<100;i++){
-		ultimateData[i] = sendByte(0xff);
-	}
-	for(i=0;i<15;i++){
-		ultimateData[i] = sendByte(0xff);
+	return target;
+
+}
+
+void getPartitionOneOffset(){
+	while(sendByte(0xff)!=0xfe){}
+	unsigned int i;
+
+	partitionStart = getInfoFromBlock(0x1C6,4,0);
+	i=0x1CA;
+	/*for(i=1; i<0x1C6; i++){
+		sendByte(0xFF);
 	}*/
+	for(i; i<514; i++){
+		sendByte(0xFF);
+	}
+	if(partitionStart == 0x800){
+		P1OUT |= GOOD;
+	}
+	else{
+		P1OUT |= BAD;
+	}
+}
+
+void getPartitionOneInfo(){
+	while(sendByte(0xff)!=0xfe){}
+	unsigned int i=0;
+
+	secsPerClust = getInfoFromBlock(0x0D,1,0);
+	i=0xE;
+	reservedClusters = getInfoFromBlock(0x0E,2,i);
+	i=0x0E+2;
+	numFats = getInfoFromBlock(0x10,1,i);
+	i=0x10+1;
+	sectPerFat = getInfoFromBlock(0x16,2,i);
 }
 
 unsigned long sendFrame(unsigned int sdcmd, long cmdArg, int CRC, int responseBytes){
@@ -78,8 +105,11 @@ unsigned long sendFrame(unsigned int sdcmd, long cmdArg, int CRC, int responseBy
 	unsigned long response = (unsigned long)errorCode;
 
 
-	if(sdcmd == 17 && errorCode == 0x00){
-		readBlock();
+	if(sdcmd == 17 && errorCode == 0x00 && partitionStart == 0){
+		getPartitionOneOffset();
+	}
+	else if(sdcmd == 17 && errorCode == 0x00 && numFats == 0){
+		getPartitionOneInfo();
 	}
 
 
@@ -154,9 +184,7 @@ int main(void) {
 		while(sdResponse != 0){
 			sdResponse = sendFrame(55,0,0x95,0);	//Send ACMD41 until we get out of idle state
 			sdResponse = sendFrame(41,0,0x95,0);
-			if(sdResponse == 0){
-				P1OUT |= GOOD;
-			}
+
 		}
 	}
 	else{
@@ -164,10 +192,7 @@ int main(void) {
 		while(sdResponse != 0){
 			sdResponse = sendFrame(55,0,0x95,0);	//Send ACMD41 until we get out of idle state
 			sdResponse = sendFrame(41,0x40000000,0x95,0);
-			if(sdResponse == 0)
-			{
-				P1OUT |= GOOD;
-			}
+
 		}
 	}
 
@@ -176,8 +201,24 @@ int main(void) {
 		sdResponse = sendFrame(16,0x200,0x95,0);	//change a block size to 512 Bytes
 	}
 
-	//CLean this part up: reading
-		sdResponse = sendFrame(17,49294,0x95,0);
+	//CLean this part up: reading - SD CARD/FAT16 is clear as mud now!
+	/* 1. Format card as FAT 16
+	 * 2. Begin reading from byte 446
+	 * 3. Next 16 bytes are Partition 1 data:
+	 * 		a. Active/inactive (1byte)
+	 * 		b. Start Head (1byte)
+	 * 		c. Start Sector/cylinder (2bytes)
+	 * 		d. Partition Type (1byte)
+	 * 		e. End head (1byte)
+	 * 		f. End sector/cylinder (wbytes)
+	 * 		g. Partition 1 start sector (4bytes)
+	 * 4. Subsequent 16 bytes are the same data for Partition 2
+	 *
+	 */
+//	readBlock(m,5);
+	sdResponse = sendFrame(17,0,0x95,0);
+	sdResponse = sendFrame(17,partitionStart,0x95,0);
+	P1OUT |= GOOD;
 
 	for(;;) {
 
